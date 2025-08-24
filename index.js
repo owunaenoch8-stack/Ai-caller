@@ -1,34 +1,29 @@
 const express = require("express");
-const { createServer } = require("http");
-const { WebSocketServer } = require("ws");
+const bodyParser = require("body-parser");
+const { twiml } = require("twilio");
 
 const app = express();
-const server = createServer(app);
+app.use(bodyParser.urlencoded({ extended: false }));
 
-app.get("/", (req, res) => res.send("Server is running ✅"));
+// Root route
+app.get("/", (req, res) => {
+  res.send("Server is running ✅");
+});
 
-const wss = new WebSocketServer({ server, path: "/twilio-stream" });
+// Voice route for Twilio calls
+app.post("/voice", (req, res) => {
+  const twimlResponse = new twiml.VoiceResponse();
 
-wss.on("connection", (ws) => {
-  console.log("✅ Twilio connected");
-
-  ws.on("message", (data) => {
-    try {
-      const msg = JSON.parse(data.toString());
-      if (msg.event === "start") {
-        console.log("▶️ Call started:", msg.start.callSid);
-      } else if (msg.event === "media") {
-        // audio chunk comes here
-      } else if (msg.event === "stop") {
-        console.log("⏹️ Call ended");
-      }
-    } catch (e) {
-      console.log("Raw:", data.toString());
-    }
+  // What the AI says when someone calls
+  twimlResponse.say("Hello! This is your AI assistant calling. How can I help you today?", {
+    voice: "alice" // female voice, natural sounding
   });
 
-  ws.on("close", () => console.log("❌ Twilio disconnected"));
+  res.type("text/xml");
+  res.send(twimlResponse.toString());
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Server listening on ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});

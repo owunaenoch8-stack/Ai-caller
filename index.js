@@ -1,59 +1,76 @@
-const express = require("express");
-const bodyParser = require("body-parser");
-const { createServer } = require("http");
-const { WebSocketServer } = require("ws");
-const { twiml } = require("twilio");
+// index.js
+const express = require('express');
+const http = require('http');
+const WebSocket = require('ws');
+const { twiml: { VoiceResponse } } = require('twilio');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
-app.use(bodyParser.urlencoded({ extended: false }));
+app.use(express.json());
 
-// --- Root check
-app.get("/", (req, res) => {
-  res.send("Server is running ✅ (root route)");
+// TwiML route: Twilio will POST here when a call comes in
+app.post('/voice', (req, res) => {
+  const vr = new VoiceResponse();
+  // IMPORTANT: replace domain below with your Render domain (already set)
+  vr.start().stream({ url: 'wss://ai-caller-sgbu.onrender.com/twilio-ws' });
+  vr.say({ voice: 'alice' }, 'Connecting to the AI assistant, please wait.');
+  vr.pause({ length: 600 }); // keeps call open while streaming
+  res.type('text/xml');
+  res.send(vr.toString());
 });
 
-// --- Twilio will hit this when a call starts
-app.post("/voice", (req, res) => {
-  const VoiceResponse = new twiml.VoiceResponse();
+// health check
+app.get('/', (req, res) => res.send('Server running'));
 
-  // IMPORTANT: change this to YOUR Render domain
-  const streamUrl = "wss://ai-caller-sgbu.onrender.com/media-stream";
+// create HTTP server so we can attach ws to same port
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server, path: '/twilio-ws' });
 
-  const connect = VoiceResponse.connect();
-  connect.stream({ url: streamUrl });
+wss.on('connection', (ws, req) => {
+  console.log('Twilio MediaStream connected');
 
-  res.type("text/xml");
-  res.send(VoiceResponse.toString());
-});
+  // create unique file per connection for debug
+  const filename = path.join(__dirname, `call_${Date.now()}_${Math.floor(Math.random()*1e6)}.pcm`);
+  const writeStream = fs.createWriteStream(filename);
+  console.log('Writing PCM to', filename);
 
-// --- Create HTTP server and WebSocket for Twilio Media Streams
-const server = createServer(app);
-
-// WebSocket endpoint Twilio <Stream> will connect to
-const wss = new WebSocketServer({ server, path: "/media-stream" });
-
-wss.on("connection", (ws) => {
-  console.log("✅ Twilio media stream connected");
-
-  ws.on("message", (msg) => {
+  ws.on('message', (raw) => {
     try {
-      const data = JSON.parse(msg.toString());
+      const msg = JSON.parse(raw.toString());
+      // log event type
+      if (msg.event) console.log('event:', msg.event);
 
-      if (data.event === "start") {
-        console.log("▶️ Stream started. Call SID:", data.start.callSid);
-      } else if (data.event === "media") {
-        // audio frames arrive here in base64 (data.media.payload)
-        // we'll plug AI here next
-      } else if (data.event === "stop") {
-        console.log("⏹️ Stream stopped");
+      if (msg.event === 'connected') {
+        console.log('Connected event payload:', msg);
+      } else if (msg.event === 'start') {
+        console.log('Stream start:', msg);
+      } else if (msg.event === 'media') {
+        // msg.media.payload is base64 PCM (s16le)
+        const payload = msg.media && msg.media.payload;
+        if (payload) {
+          const audioBuffer = Buffer.from(payload, 'base64');
+          writeStream.write(audioBuffer);
+        }
+      } else if (msg.event === 'stop') {
+        console.log('Stream stopped for connection');
+      } else if (msg.event === 'error') {
+        console.error('MediaStream error', msg);
       }
-    } catch (e) {
-      console.log("Received non-JSON message:", msg.toString());
+    } catch (err) {
+      console.error('Failed to parse message', err);
     }
   });
 
-  ws.on("close", () => console.log("❌ Twilio stream disconnected"));
+  ws.on('close', () => {
+    console.log('MediaStream disconnected, closing file');
+    writeStream.end();
+  });
+
+  ws.on('error', (err) => {
+    console.error('WebSocket error', err);
+  });
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Server listening on ${PORT}`));
+server.listen(PORT, () => console.log(`Listening on ${PORT}`));
